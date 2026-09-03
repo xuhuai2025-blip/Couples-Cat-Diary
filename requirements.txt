@@ -1,0 +1,5 @@
+Flask>=3.0,<4
+Werkzeug>=3.0,<4
+waitress>=3.0,<4
+hypercorn>=0.17,<1
+asgiref>=3.8,<4
