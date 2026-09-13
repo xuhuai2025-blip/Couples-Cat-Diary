@@ -1362,12 +1362,76 @@
   }
   .score-emoji-picker {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 8px;
     margin-bottom: 14px;
     transition: opacity 0.2s;
   }
   .score-emoji-picker.swap { animation: score-fade-swap 0.2s; }
+  .score-emoji-cats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-bottom: 6px;
+    border-bottom: 1px dashed #e8dcc4;
+  }
+  .score-emoji-cat {
+    background: #f7ecd5;
+    color: #8b6a3e;
+    border: 1px solid #e0cfa5;
+    border-radius: 12px;
+    padding: 3px 9px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .score-emoji-cat:hover { background: #f3e0b8; }
+  .score-emoji-cat.active {
+    background: var(--accent, #e08a3e);
+    color: #fff;
+    border-color: var(--accent, #e08a3e);
+    font-weight: 600;
+  }
+  .score-emoji-custom {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .score-emoji-custom-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 13px;
+    border: 1px solid #e0cfa5;
+    border-radius: 6px;
+    background: #fffefb;
+    color: #4a3520;
+    outline: none;
+  }
+  .score-emoji-custom-input:focus { border-color: #c4a06a; box-shadow: 0 0 0 2px rgba(196,160,106,0.15); }
+  .score-emoji-custom-add {
+    background: linear-gradient(135deg, #f2b66b 0%, #e08a3e 100%);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .score-emoji-custom-add:hover { filter: brightness(1.05); }
+  .score-emoji-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 2px;
+  }
 
   /* ================== submit-btn v2 ================== */
   .score-submit {
@@ -2986,7 +3050,44 @@ const STORE_KEYS = {
   bucket: 'couple_bucket_v2',
   score: 'couple_score_v2',
   scoreOld: 'couple_score_v1',
+  bucketOrder: 'couple_bucket_order_v2',  // 本机自定义顺序（不持久化到后端）
 };
+
+/* —— 本机自定义 bucket 顺序覆盖层 ——
+ * 设计意图：拖拽只在本机生效，不发后端（避免两人看到不同顺序的混乱）。
+ * 用 localStorage 缓存每类下的 id 顺序，新增/删除的自动追加到该类末尾。
+ * 形状：{ [category]: [id1, id2, ...] }，缺失的类视为空数组。
+ */
+function loadBucketOrder() {
+  return loadJSON(STORE_KEYS.bucketOrder, {}) || {};
+}
+function saveBucketOrder(order) {
+  saveJSON(STORE_KEYS.bucketOrder, order);
+}
+// 按 order 覆盖层重排 bucketItems（未知 id 追加到对应类末尾）
+function applyBucketOrder(items, order) {
+  if (!order || typeof order !== 'object') return items;
+  const out = [];
+  for (const cat of CAT_ORDER) {
+    const ids = Array.isArray(order[cat]) ? order[cat] : [];
+    const byId = new Map(items.filter(it => it.category === cat).map(it => [it.id, it]));
+    const seen = new Set();
+    // 先按缓存顺序
+    for (const id of ids) {
+      const it = byId.get(id);
+      if (it) { out.push(it); seen.add(id); }
+    }
+    // 该类下没在缓存里的（新增/未排序）追加到末尾
+    for (const it of items) {
+      if (it.category === cat && !seen.has(it.id)) { out.push(it); seen.add(it.id); }
+    }
+  }
+  // 兜底：未知类别的 bucket 保留在末尾
+  for (const it of items) {
+    if (!CAT_ORDER.includes(it.category)) out.push(it);
+  }
+  return out;
+}
 
 /* One-time migration: add `score` field to legacy v1 entries */
 (function migrateScore() {
@@ -3280,7 +3381,12 @@ function attachBucketDnD() {
       const tgtIdx = bucketItems.findIndex(it => it.id === targetId);
       const [moved] = bucketItems.splice(srcIdx, 1);
       bucketItems.splice(tgtIdx, 0, moved);
-      // 拖拽顺序只在本机内有效（不持久化到后端，避免每人看到不同顺序的混乱）
+      // 把当前 srcItem.category 下的 id 顺序写进 localStorage（仅本机有效，不发后端）
+      const order = loadBucketOrder();
+      order[srcItem.category] = bucketItems
+        .filter(it => it.category === srcItem.category)
+        .map(it => it.id);
+      saveBucketOrder(order);
       renderBucket();
     });
   });
@@ -3395,14 +3501,24 @@ document.getElementById('bucket-confirm').addEventListener('click', async () => 
 /* ============================================================
    Score board
    ============================================================ */
-const EMOJI_SET = [
-  '😺','😸','😻','😽','😘','🥰','😍','🤗','💕','💖','💗','💝',
-  '🌹','🌸','🌷','🍰','🍣','🍱','🍜','☕','🍵','🍦','🎂','🍫',
-  '🎁','🎀','🎈','🎉','🎊','⭐','🌟','✨','🌈','🌙','☀️','🌻',
-  '😢','😭','😤','😡','🤬','💔','😔','😞','🙄','😒','😑','🫠',
-];
-const EMOJI_PLUS = ['😺','😸','😻','😽','😘','🥰','😍','🤗','💕','💖','💗','💝','🌹','🌸','🌷','🍰','🍣','🍱','🍜','☕','🍵','🍦','🎂','🍫','🎁','🎀','🎈','🎉','🎊','⭐','🌟','✨','🌈','🌙','☀️','🌻'];
-const EMOJI_MINUS = ['😢','😭','😤','😡','💔','😔','😞','🙄','😒','😑','🫠','🤬'];
+// 分类 emoji 库（覆盖 mac / iOS 常用 unicode emoji）
+// 每个 emoji 数 ≤ 1 个 ZWJ 组合，便于 maxlength=8 字符容纳 4 个组合 emoji
+const EMOJI_CATEGORIES = {
+  all:      ['😺','😸','😻','😽','😘','🥰','😍','🤗','💕','💖','💗','💝','🌹','🌸','🌷','🍰','🍣','🍱','🍜','☕','🍵','🍦','🎂','🍫','🎁','🎀','🎈','🎉','🎊','⭐','🌟','✨','🌈','🌙','☀️','🌻','😢','😭','😤','😡','🤬','💔','😔','😞','🙄','😒','😑','🫠','👍','👎','👏','🙌','🤝','🙏','💪','✌️','🤞','👌','🤘','👋','🙋','🤚','🐱','🐶','🐰','🐻','🐼','🦊','🐯','🦁','🐸','🐵','🐔','🐧','🦄','🍕','🍔','🍟','🌭','🍿','🍩','🍪','🥐','🥨','🧀','🥗','🍱','🍜','🍣','🍤','🍙','🍦','🍧','🍨','🥤','🧋','🍺','🍷','⚽','🏀','🏈','⚾','🎾','🏐','🏉','🎱','🏓','🏸','⛳','🎣','🎮','🎲','🧩','🎨','🎭','🎤','🎧','🎼','🎹','🥁','🎷','🎺','🎸','🌸','🌺','🌻','🌷','🌹','🌼','💐','🌿','🍀','🌱','🌳','🌴','🌵','⭐','🌟','✨','⚡','🔥','💥','🌈','☀️','🌤️','⛅','🌧️','❄️','☃️','⛄','🌊','💧','❤️','🧡','💛','💚','💙','💜','🖤','🤍','💖','💝','💔','❣️','💕','💞','💓','💗','💘','💟','♥️','🎁','🎀','🎈','🎉','🎊','🏆','🥇','🥈','🥉','🎖️','🏅','📱','💻','⌚','📷','🎥','📺','🔑','💡','📚','✉️','💌','🕯️','☕','🍵'],
+  smileys: ['😺','😸','😻','😽','😘','🥰','😍','🤗','😊','😉','😄','😃','😀','🙂','😇','🥹','🤩','🤔','😏','😴','😪','🥱','😋','😛','😜','🤪','😎','🤓','🧐','😮','😲','😯','😳','🥵','🥶','😱','😨','😰','😢','😭','😤','😡','🤬','😔','😞','🙄','😒','😑','🫠','🤡','💀','👻','👽','🤖','😈','👿'],
+  gestures:['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍️','💅','🤳','💪','🦾','🦿','🦵','🦶','👂','🦻','👃','🧠','🦷','🦴','👀','👁️','👅','👄','💋'],
+  animals: ['🐱','🐶','🐰','🐻','🐼','🦊','🐯','🦁','🐮','🐷','🐸','🐵','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜','🦂','🐢','🐍','🦎','🐙','🦑','🦐','🦀','🐡','🐠','🐟','🐬','🐳','🐋','🦈'],
+  food:    ['🍕','🍔','🍟','🌭','🍿','🥓','🥚','🍳','🧇','🥞','🧈','🍞','🥐','🥨','🥯','🥖','🧀','🥗','🥙','🥪','🌮','🌯','🥫','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🥛','🍼','☕','🍵','🍶','🍾','🍷','🍸','🍹','🍺','🥤','🧋','🧃','🧊'],
+  activity:['⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🏑','🥍','🏏','🥅','⛳','🪁','🏹','🎣','🤿','🥊','🥋','🎽','🛹','🛼','🛷','⛸️','🥌','🎿','⛷️','🏂','🪂','🏋️','🤼','🤸','⛹️','🤺','🤾','🏌️','🏇','🧘','🏄','🏊','🤽','🚣','🧗','🚵','🚴','🏆','🥇','🥈','🥉','🏅','🎖️','🏵️','🎗️','🎟️','🎫','🎮','🎲','🧩','🎨','🎭','🎤','🎧','🎼','🎹','🥁','🎷','🎺','🎸','🪗','🎻','🎬','🎤','📷','📸'],
+  nature:  ['🌸','🌺','🌻','🌷','🌹','🌼','💐','🌿','🍀','🌱','🌳','🌴','🌵','🌾','🌿','🍃','🍂','🍁','🌊','💧','💦','☔','☂️','🌫️','🌬️','🌪️','🌈','⭐','🌟','✨','⚡','🔥','💥','☀️','🌤️','⛅','🌥️','🌦️','🌧️','🌨️','❄️','☃️','⛄','🌬️','💨','🌙','🌚','🌝','🌛','🌜','🌞','🌕','🌖','🌗','🌘','🌑','🌒','🌓','🌔','🌎','🌍','🌏','🪐','💫','⭐','🌟'],
+  symbols: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💖','💝','💔','❣️','💕','💞','💓','💗','💘','💟','♥️','💌','💋','💯','💢','💥','💫','💦','💨','🕳️','💬','💭','🗯️','♨️','♻️','✅','❌','❎','❓','❔','⚠️','🚫','💯','🔞','☢️','☣️','⬆️','⬇️','⬅️','➡️','↗️','↘️','↙️','↖️','↕️','↔️','↩️','↪️','⤴️','⤵️','🔃','🔄','🔙','🔚','🔛','🔜','🔝','🛐','⚛️','🕉️','✡️','☸️','☯️','✝️','☦️','☪️','☮️','🕎','🔯','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🔀','🔁','🔂','🎵','🎶','🔅','🔆','➕','➖','➗','✖️','🟰','💲','💱','™️','©️','®️','〰️','➰','➿','🔚','🔙','🔛','🔜','🔝'],
+  objects: ['🎁','🎀','🎈','🎉','🎊','🎂','🍰','🧁','🥳','🎏','🎐','🎑','🧧','🎀','🎗️','🎟️','🎫','🏆','🏅','🎖️','🥇','🥈','🥉','📱','💻','⌚','📷','📸','🎥','📺','📻','🎙️','🎚️','🎛️','🧭','⏱️','⏲️','⏰','🕰️','⌛','⏳','📡','🔋','🔌','💡','🔦','🕯️','🧯','🛢️','💸','💵','💴','💶','💷','💰','💳','💎','⚖️','🧰','🔧','🔨','⚒️','🛠️','⛏️','🔩','⚙️','🧱','⛓️','🧲','🔫','💣','🧨','🪓','🔪','🗡️','⚔️','🛡️','🚬','⚰️','⚱️','🏺','🔮','📿','🧿','💈','⚗️','🔭','🔬','🕳️','🩹','🩺','💊','💉','🩸','🧬','🦠','🧫','🧪','🌡️','🧹','🧺','🧻','🚽','🚿','🛁','🛀','🧼','🪒','🧽','🪥','🧯','🛒','🚭','⚠️','☢️','☣️','⬆️','⬇️','⬅️','➡️','🔞'],
+};
+
+// 兼容旧代码：EMOJI_SET 等同于 EMOJI_CATEGORIES.all
+const EMOJI_SET = EMOJI_CATEGORIES.all;
+const EMOJI_PLUS = EMOJI_CATEGORIES.smileys.concat(EMOJI_CATEGORIES.gestures.slice(0, 10), EMOJI_CATEGORIES.symbols.slice(0, 12), EMOJI_CATEGORIES.nature.slice(0, 8));
+const EMOJI_MINUS = EMOJI_CATEGORIES.smileys.filter(e => /[😢😭😤😡🤬💔😔😞🙄😒😑🫠]/.test(e));
 
 const scoreText = document.getElementById('score-text');
 const scoreValueInput = document.getElementById('score-value');
@@ -3453,16 +3569,94 @@ function renderEmojiChips() {
   });
 }
 
+// 分类 tab 当前选中（默认 all）
+let currentEmojiCategory = 'all';
+
 function renderEmojiPicker(filter = 'all') {
   if (!emojiPicker) return;
-  const list = filter === 'plus' ? EMOJI_PLUS
-             : filter === 'minus' ? EMOJI_MINUS
-             : EMOJI_SET;
-  emojiPicker.innerHTML = list.map(e => `
+  // filter 优先：plus/minus 走旧路径，否则用 currentEmojiCategory
+  let list;
+  if (filter === 'plus') list = EMOJI_PLUS;
+  else if (filter === 'minus') list = EMOJI_MINUS;
+  else {
+    currentEmojiCategory = filter === 'all' || !filter ? currentEmojiCategory : filter;
+    list = EMOJI_CATEGORIES[currentEmojiCategory] || EMOJI_CATEGORIES.all;
+  }
+
+  // 分类 tab
+  const categoryTabs = Object.keys(EMOJI_CATEGORIES).map(cat => {
+    const label = ({
+      all: '全部', smileys: '表情', gestures: '手势', animals: '动物',
+      food: '食物', activity: '活动', nature: '自然', symbols: '符号', objects: '物品'
+    })[cat] || cat;
+    return `<button class="score-emoji-cat ${cat === currentEmojiCategory ? 'active' : ''}" data-cat="${cat}" type="button">${label}</button>`;
+  }).join('');
+
+  // 自选表情输入行（始终显示）
+  const customRow = `
+    <div class="score-emoji-custom">
+      <input type="text" class="score-emoji-custom-input" id="emoji-custom-input"
+        maxlength="12" placeholder="复制表情后粘贴到这里…" />
+      <button class="score-emoji-custom-add" id="emoji-custom-add" type="button">添加</button>
+    </div>
+  `;
+
+  // emoji 网格
+  const stamps = list.map(e => `
     <button class="score-emoji-stamp ${selectedEmojis.includes(e) ? 'selected' : ''}" data-emoji="${e}" type="button">${e}</button>
   `).join('');
+
+  emojiPicker.innerHTML = `
+    <div class="score-emoji-cats">${categoryTabs}</div>
+    ${customRow}
+    <div class="score-emoji-grid">${stamps}</div>
+  `;
+
+  // 动画
   emojiPicker.classList.add('swap');
   setTimeout(() => emojiPicker.classList.remove('swap'), 220);
+
+  // 分类 tab 点击
+  emojiPicker.querySelectorAll('.score-emoji-cat').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentEmojiCategory = btn.dataset.cat;
+      renderEmojiPicker(currentEmojiCategory);
+    });
+  });
+
+  // 自选输入：粘贴时直接加
+  const customInput = emojiPicker.querySelector('#emoji-custom-input');
+  const customAdd = emojiPicker.querySelector('#emoji-custom-add');
+  function addCustom() {
+    if (!customInput) return;
+    const raw = (customInput.value || '').trim();
+    if (!raw) return;
+    // 提取所有 emoji 字符（支持粘贴一串，从中抓取前 4 个 emoji）
+    const emojiMatches = raw.match(/\p{Extended_Pictographic}(‍\p{Extended_Pictographic})*/gu) || [];
+    if (emojiMatches.length === 0) {
+      if (window.toast) window.toast('没有识别到表情，请粘贴 emoji');
+      return;
+    }
+    emojiMatches.slice(0, 4).forEach(em => {
+      if (!selectedEmojis.includes(em)) selectedEmojis.push(em);
+    });
+    customInput.value = '';
+    renderEmojiChips();
+    renderEmojiPicker(currentEmojiCategory);
+    if (window.toast) window.toast(`已添加 ${emojiMatches.slice(0, 4).length} 个表情`);
+  }
+  if (customAdd) customAdd.addEventListener('click', addCustom);
+  if (customInput) {
+    customInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); addCustom(); }
+    });
+    // Ctrl+V / Cmd+V 粘贴时直接提取
+    customInput.addEventListener('paste', () => {
+      setTimeout(addCustom, 0);
+    });
+  }
+
+  // 已有 emoji 按钮点击
   emojiPicker.querySelectorAll('.score-emoji-stamp').forEach(btn => {
     btn.addEventListener('click', () => {
       const e = btn.dataset.emoji;
@@ -5049,7 +5243,6 @@ const CatPet = (() => {
     loadPetStats()    { return this._call('GET',    '/api/pet/stats'); },
     loadPetPending()  { return this._call('GET',    '/api/pet/pending'); },
     settlePet()       { return this._call('POST',   '/api/pet/settle'); },
-    loadPresence()    { return this._call('GET',    '/api/presence'); },
     getTogether()     { return this._call('GET',    '/api/together'); },
     putTogether(d)    { return this._call('PUT',    '/api/together', d); },
     loadGuestbook()   { return this._call('GET',    '/api/guestbook'); },
@@ -5099,7 +5292,9 @@ const CatPet = (() => {
   // === 数据加载 ===
   async function loadAllData() {
     const [b, s] = await Promise.all([api.loadBuckets(), api.loadScores()]);
-    bucketItems = b.buckets || [];
+    const rawBuckets = b.buckets || [];
+    // 叠加本机自定义顺序（拖拽顺序只在本地有效，详见 STORE_KEYS.bucketOrder）
+    bucketItems = applyBucketOrder(rawBuckets, loadBucketOrder());
     scoreEntries = s.scores || [];
     if (typeof renderBucket === 'function') renderBucket();
     if (typeof renderScore === 'function') renderScore();
@@ -5834,7 +6029,6 @@ const CatPet = (() => {
     refreshInv();
     refreshPetStats();
     refreshPendingBadges();  // 启动先拉一次,确保 _petPending 立即有值
-    if (typeof refreshPresence === 'function') refreshPresence();
     if (typeof refreshGuestbook === 'function') refreshGuestbook();
     // 立刻试一次结算（用户刚登录，pending 可能已到期）
     tryAutoSettle();
@@ -5845,7 +6039,6 @@ const CatPet = (() => {
       refreshPetStats();
       tryAutoSettle();
       refreshPendingBadges();
-      if (typeof refreshPresence === 'function') refreshPresence();
       if (typeof refreshGuestbook === 'function') refreshGuestbook();
     }, 10 * 1000);
   }
@@ -5905,42 +6098,8 @@ const CatPet = (() => {
 })();
 </script>
 
-<!-- 角落"对方是否在线"小指示器 -->
+<!-- === 留言簿（mid-right 圆形 FAB + 3 个对话气泡） === -->
 <style>
-#presence-indicator {
-  position: fixed;
-  top: 14px;
-  right: 14px;
-  z-index: 9999;
-  background: rgba(255, 248, 230, 0.94);
-  border: 1px solid #f0d890;
-  border-radius: 18px;
-  padding: 5px 11px;
-  font-size: 12px;
-  color: #5a4a30;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  user-select: none;
-  cursor: default;
-  font-family: inherit;
-  letter-spacing: 0;
-  transition: opacity 0.2s;
-}
-#presence-indicator:hover { opacity: 1; }
-#presence-indicator.dim    { opacity: 0.55; }
-.presence-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #ccc;
-  flex-shrink: 0;
-  transition: background 0.2s, box-shadow 0.2s;
-}
-.presence-dot.online  { background: #6fcf97; box-shadow: 0 0 6px rgba(111,207,151,0.6); }
-.presence-dot.away    { background: #f2c94c; }
-.presence-dot.offline { background: #bbb; }
 
 /* === 留言簿（mid-right 圆形 FAB + 3 个对话气泡） === */
 #guestbook-fab {
@@ -6201,11 +6360,6 @@ const CatPet = (() => {
 }
 </style>
 
-<div id="presence-indicator" class="dim" title="对方在线状态（每 30s 刷新，5 分钟内有活动 = 在线）">
-  <span class="presence-dot" id="presence-dot"></span>
-  <span id="presence-text">TA · 加载中…</span>
-</div>
-
 <div id="guestbook-fab" class="collapsed" title="留言簿（最多 3 条最新留言）">
   <div id="guestbook-trigger">
     <button id="guestbook-fab-btn" type="button" aria-label="展开留言簿" aria-expanded="false"><img src="images/cat-call.png" alt="留言簿" /><span class="gb-badge" id="guestbook-badge"></span></button>
@@ -6230,33 +6384,6 @@ function _fmtAgo(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
   return Math.floor(diff / 86400) + ' 天前';
 }
-async function refreshPresence() {
-  var dot = document.getElementById('presence-dot');
-  var text = document.getElementById('presence-text');
-  var box = document.getElementById('presence-indicator');
-  if (!dot || !text) return;
-  try {
-    var r = await api.loadPresence();
-    var me = null;
-    try { me = JSON.parse(localStorage.getItem(USER_KEY) || '{}').id; } catch (_) {}
-    var other = (r.users || []).find(function (u) { return u.user_id !== me; });
-    if (!other) return;
-    var name = other.display_name || other.username;
-    if (other.online) {
-      dot.className = 'presence-dot online';
-      text.textContent = name + ' · 在线';
-      box.classList.remove('dim');
-    } else {
-      dot.className = 'presence-dot offline';
-      text.textContent = name + ' · ' + _fmtAgo(other.last_seen_at);
-      box.classList.add('dim');
-    }
-  } catch (e) {
-    text.textContent = 'TA · 离线';
-    dot.className = 'presence-dot offline';
-  }
-}
-window.refreshPresence = refreshPresence;
 
 // === 留言簿 ===
 function _renderGuestbook(messages, max) {

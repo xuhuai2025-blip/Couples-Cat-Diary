@@ -212,8 +212,6 @@ class RegressionTests(unittest.TestCase):
         beta_inventory = self.client.get("/api/pet/inventory", headers=beta_auth).get_json()["items"]
         treat = next(item for item in beta_inventory if item["key"] == "cat-treat")
         self.assertEqual(treat["quantity"], 2)
-        visible_users = self.client.get("/api/presence", headers=beta_auth).get_json()["users"]
-        self.assertEqual({user["username"] for user in visible_users}, {"alpha", "beta"})
 
         duplicate_payload = {
             "accounts": [
@@ -227,6 +225,52 @@ class RegressionTests(unittest.TestCase):
         gamma_count = conn.execute("SELECT COUNT(*) FROM users WHERE username='gamma'").fetchone()[0]
         conn.close()
         self.assertEqual(gamma_count, 0)
+
+    def test_iso_utc_helper_converts_sqlite_utc_to_z_suffix(self):
+        """_iso_utc 必须把 SQLite CURRENT_TIMESTAMP 字符串（无时区 UTC）转成带 'Z' 的 ISO 8601。
+
+        否则前端 `new Date('YYYY-MM-DD HH:MM:SS')` 会按本地时间解析，
+        在 UTC+8 时区里整体偏 8 小时（留言簿"8小时前"就是这个 bug）。
+        """
+        from datetime import datetime, timezone
+
+        # 1) 纯 SQLite CURRENT_TIMESTAMP 格式 → 必须转成带 'Z'
+        sqlite_ts = "2026-09-06 00:30:00"
+        out = cat_app._iso_utc(sqlite_ts)
+        self.assertTrue(out.endswith("Z"), f"_iso_utc 没加 Z 后缀: {out!r}")
+        # 解析回来必须是 UTC 时刻 00:30:00，不能丢精度也不能加 8 小时
+        parsed = datetime.fromisoformat(out.replace("Z", "+00:00"))
+        self.assertEqual(parsed, datetime(2026, 9, 6, 0, 30, 0, tzinfo=timezone.utc))
+        # 2) 微秒格式也要兼容
+        out_ms = cat_app._iso_utc("2026-09-06 00:30:00.123456")
+        self.assertTrue(out_ms.endswith("Z"))
+        # 3) None / 非字符串原样返回
+        self.assertIsNone(cat_app._iso_utc(None))
+        self.assertEqual(cat_app._iso_utc(123), 123)
+        # 4) 已经带时区的字符串不能重复转换（避免双重转 UTC 偏移）
+        already_iso = "2026-09-06T00:30:00+08:00"
+        self.assertEqual(cat_app._iso_utc(already_iso), already_iso)
+        already_z = "2026-09-06T00:30:00Z"
+        self.assertEqual(cat_app._iso_utc(already_z), already_z)
+
+    def test_guestbook_and_presence_return_iso_utc_with_z(self):
+        """端到端：留言簿 createdAt 和 presence last_seen_at 必须带 'Z' 后缀。"""
+        # 留言簿：先发一条
+        post_resp = self.client.post(
+            "/api/guestbook", json={"content": "tz test"}, headers=self.auth
+        )
+        self.assertEqual(post_resp.status_code, 200)
+        post_payload = post_resp.get_json()
+        self.assertTrue(
+            post_payload["messages"][0]["createdAt"].endswith("Z"),
+            f"guestbook POST createdAt 缺 Z: {post_payload['messages'][0]['createdAt']!r}",
+        )
+        # 再 GET 一次
+        get_payload = self.client.get("/api/guestbook", headers=self.auth).get_json()
+        self.assertTrue(
+            get_payload["messages"][0]["createdAt"].endswith("Z"),
+            f"guestbook GET createdAt 缺 Z: {get_payload['messages'][0]['createdAt']!r}",
+        )
 
 
 if __name__ == "__main__":

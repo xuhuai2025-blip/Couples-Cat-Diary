@@ -11,7 +11,7 @@ import secrets
 import sqlite3
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from threading import Lock
@@ -26,8 +26,34 @@ from init_db import migrate_pair_schema
 BASE_DIR = Path(__file__).parent.resolve()
 DB_PATH = BASE_DIR / "diary.db"
 TOKEN_TTL_HOURS = 24 * 30
-HOST = os.environ.get("HOST", "127.0.0.1")  # 安全默认值；确需局域网访问时显式设置 HOST=0.0.0.0 并配置防火墙
-PORT = int(os.environ.get("PORT", "8080"))
+HOST = os.environ.get("HOST", "0.0.0.0")  # 绑所有网卡，由 Windows 防火墙限制可达范围（仅本地子网）
+PORT = int(os.environ.get("PORT", "8443"))
+
+
+def _iso_utc(value):
+    """把 SQLite CURRENT_TIMESTAMP 字符串转成带 'Z' 的 ISO 8601（UTC）。
+
+    SQLite 的 CURRENT_TIMESTAMP 输出形如 'YYYY-MM-DD HH:MM:SS'，无时区且语义为 UTC。
+    原样返回给前端时，`new Date('YYYY-MM-DD HH:MM:SS')` 会按 **本地时间** 解析，
+    在 UTC+8 时区里整体偏 8 小时（留言簿时间显示"8小时前"就是由此而来）。
+    这里统一转成 'YYYY-MM-DDTHH:MM:SSZ'，让前端 `new Date(...)` 拿到正确的 UTC 时刻。
+
+    已经带时区信息（'+HH:MM' / 'Z' / 'T'）的字符串原样返回，避免双重转换。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    # 已经有显式时区信息（'T' 分隔符 + 偏移/Z）→ 原样
+    if "T" in value and ("+" in value[10:] or value.endswith("Z") or value.endswith("z")):
+        return value
+    # SQLite CURRENT_TIMESTAMP 格式 = 'YYYY-MM-DD HH:MM:SS[.ffffff]'，按 UTC 解释
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt).isoformat() + "Z"
+        except ValueError:
+            continue
+    return value  # 无法解析时回退到原值（前端会显示 '从未'）
 
 # === 登录限流 ===
 # 按 IP 维度，3 次失败/小时 → 锁 1 小时
@@ -155,12 +181,6 @@ def auth_required(f):
             return jsonify({"error": "account has no shared space"}), 403
         g.pair_id = row["pair_id"]
         g.auth_token = token
-        # 顺便记录 last_seen_at(供 /api/presence 判定"对方是否在线")
-        try:
-            db.execute("UPDATE users SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?", (g.user["id"],))
-            db.commit()
-        except Exception:
-            pass
         return f(*args, **kwargs)
     return wrapper
 
@@ -251,48 +271,6 @@ def register_pair():
             {"username": second["username"], "display_name": second["display_name"]},
         ],
     }), 201
-
-
-@app.route("/api/presence", methods=["GET"])
-@auth_required
-def presence():
-    """返回所有账号的在线状态（基于 users.last_seen_at + 5 分钟阈值）。
-
-    触发 last_seen_at: 任何 auth_required 请求都会更新（auth_required wrapper 自动）。
-    在线判定: now - last_seen_at < 5 分钟 = 在线。
-    """
-    db = get_db()
-    rows = db.execute(
-        "SELECT id, username, display_name, last_seen_at FROM users WHERE pair_id=? ORDER BY id",
-        (g.pair_id,),
-    ).fetchall()
-    # SQLite CURRENT_TIMESTAMP 使用无时区 UTC；转换后移除 tzinfo 以保持可比较。
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    threshold = timedelta(minutes=5)
-    out = []
-    for r in rows:
-        last = r["last_seen_at"]
-        is_online = False
-        if last:
-            # sqlite CURRENT_TIMESTAMP 格式 = 'YYYY-MM-DD HH:MM:SS' (带空格)
-            # Python 3.11+ 的 fromisoformat 也接受，但用 strptime 更稳
-            last_dt = None
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-                try:
-                    last_dt = datetime.strptime(last, fmt)
-                    break
-                except (TypeError, ValueError):
-                    continue
-            if last_dt is not None:
-                is_online = (now - last_dt) < threshold
-        out.append({
-            "user_id": r["id"],
-            "username": r["username"],
-            "display_name": r["display_name"] or r["username"],
-            "last_seen_at": last,
-            "online": is_online,
-        })
-    return jsonify({"users": out, "threshold_minutes": 5})
 
 
 # === Auth ===
@@ -599,7 +577,7 @@ def list_guestbook():
         out.append({
             "id": r["id"],
             "content": r["content"],
-            "createdAt": r["created_at"],
+            "createdAt": _iso_utc(r["created_at"]),
             "authorUserId": r["author_user_id"],
             "authorName": r["author_name"],
             "authorDisplay": r["author_display"] or r["author_name"],
@@ -646,7 +624,7 @@ def post_guestbook():
         out.append({
             "id": r["id"],
             "content": r["content"],
-            "createdAt": r["created_at"],
+            "createdAt": _iso_utc(r["created_at"]),
             "authorUserId": r["author_user_id"],
             "authorName": r["author_name"],
             "authorDisplay": r["author_display"] or r["author_name"],
